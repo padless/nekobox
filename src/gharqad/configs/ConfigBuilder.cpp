@@ -941,6 +941,108 @@ static void AppendMissingRuleSet(QJsonObject &route, const QJsonObject &ruleSet)
   route["rule_set"] = ruleSets;
 }
 
+// Rules of the "Routes" tab. Entries sharing an outbound are merged into one rule,
+// process paths and process names have to stay in separate rules because sing-box
+// requires every field of a rule to match at once.
+static QList<std::shared_ptr<RouteRule>> BuildQuickRouteRules() {
+  QList<std::shared_ptr<RouteRule>> rules;
+  if (dataStore->routing == nullptr ||
+      dataStore->routing->quick_routes == nullptr) {
+    return rules;
+  }
+  auto quick = dataStore->routing->quick_routes;
+
+  QList<int> outboundOrder;
+  QMap<int, QList<QString>> processPaths;
+  QMap<int, QList<QString>> processNames;
+  QMap<int, QList<QString>> domainKeywords;
+
+  // A route whose profile got deleted is dropped instead of failing the whole build.
+  auto accept = [&outboundOrder](const QString &match, int outbound) {
+    if (outbound >= 0 &&
+        (profileManager == nullptr ||
+         profileManager->GetProfile(outbound) == nullptr)) {
+      if (MW_show_log) {
+        MW_show_log("[Routes] Skipped \"" + match +
+                    "\", its outbound no longer exists");
+      }
+      return false;
+    }
+    if (!outboundOrder.contains(outbound)) {
+      outboundOrder.append(outbound);
+    }
+    return true;
+  };
+
+  const auto processCount =
+      qMin(quick->process_match.size(), quick->process_outbound.size());
+  for (qsizetype i = 0; i < processCount; i++) {
+    const auto value = quick->process_match[i].trimmed();
+    if (value.isEmpty()) {
+      continue;
+    }
+    const auto outbound = quick->process_outbound[i];
+    if (!accept(value, outbound)) {
+      continue;
+    }
+    if (value.contains(u'/') || value.contains(u'\\')) {
+      processPaths[outbound] << QDir::toNativeSeparators(value);
+    } else {
+      processNames[outbound] << value;
+    }
+  }
+  const auto domainCount =
+      qMin(quick->domain_match.size(), quick->domain_outbound.size());
+  for (qsizetype i = 0; i < domainCount; i++) {
+    const auto value = quick->domain_match[i].trimmed();
+    if (value.isEmpty()) {
+      continue;
+    }
+    const auto outbound = quick->domain_outbound[i];
+    if (!accept(value, outbound)) {
+      continue;
+    }
+    domainKeywords[outbound] << value;
+  }
+
+  auto makeRule = [](const QString &name, int outbound) {
+    auto rule = std::make_shared<RouteRule>();
+    rule->name = name;
+    rule->action = "route";
+    rule->outboundID = outbound;
+    return rule;
+  };
+
+  for (const auto &outbound : outboundOrder) {
+    if (processPaths.contains(outbound)) {
+      auto rule = makeRule("Quick routes: application paths", outbound);
+      rule->process_path = processPaths[outbound];
+      rules << rule;
+    }
+    if (processNames.contains(outbound)) {
+      auto rule = makeRule("Quick routes: application names", outbound);
+      rule->process_name = processNames[outbound];
+      rules << rule;
+    }
+  }
+  for (const auto &outbound : outboundOrder) {
+    if (domainKeywords.contains(outbound)) {
+      auto rule = makeRule("Quick routes: domains", outbound);
+      rule->domain_keyword = domainKeywords[outbound];
+      rules << rule;
+    }
+  }
+  return rules;
+}
+
+// Quick routes are matched before the rules of the active routing profile.
+static void PrependQuickRouteRules(std::shared_ptr<RoutingChain> &routeChain) {
+  const auto quickRules = BuildQuickRouteRules();
+  for (auto it = quickRules.crbegin(); it != quickRules.crend(); ++it) {
+    routeChain->Rules.prepend(*it);
+  }
+}
+
 static QJsonArray BuildNekoboxTunRulesForFullConfig(
     const std::shared_ptr<BuildConfigStatus> &status, QJsonObject &config) {
   auto routeChain =
@@ -949,13 +1051,17 @@ static QJsonArray BuildNekoboxTunRulesForFullConfig(
     return {};
   }
 
+  // copy for modification
+  routeChain = std::make_shared<RoutingChain>(*routeChain);
+  PrependQuickRouteRules(routeChain);
+
   std::map<int, QString> outboundMap;
   outboundMap[proxyID] = "proxy";
   outboundMap[directID] = "direct";
   outboundMap[blockID] = "block";
 
   for (auto item : *routeChain->get_used_outbounds()) {
-    if (item < 0) {
+    if (item < 0 || outboundMap.count(item) > 0) {
       continue;
     }
     auto neededEnt = profileManager->GetProfile(item);
@@ -1279,6 +1385,9 @@ void BuildConfigSingBox(const std::shared_ptr<BuildConfigStatus> &status) {
 
   // copy for modification
   routeChain = std::make_shared<RoutingChain>(*routeChain);
+  if (!blockAll) {
+    PrependQuickRouteRules(routeChain);
+  }
 
   // Direct domains
   bool needDirectDnsRules = false;
@@ -1492,7 +1601,7 @@ skip_multiple_jobs:
     outboundMap[blockID] = "block";
     int suffix = 0;
     for (const auto &item : *neededOutbounds) {
-      if (item < 0)
+      if (item < 0 || outboundMap.count(item) > 0)
         continue;
       auto neededEnt = profileManager->GetProfile(item);
       if (neededEnt == nullptr) {

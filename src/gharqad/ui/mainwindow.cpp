@@ -1195,6 +1195,10 @@ skip_updater_hide:
   // setup Speed Chart
   speedChartWidget = new SpeedWidget(this);
   ui->graph_tab->layout()->addWidget(speedChartWidget);
+
+  // setup Routes tab
+  quickRoutesWidget = new QuickRoutesWidget(this);
+  ui->routes_tab->layout()->addWidget(quickRoutesWidget);
 /*
   // table UI
   ui->proxyListTable->rowsSwapped = [=, this](int row1, int row2) {

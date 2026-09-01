@@ -18,6 +18,7 @@
 #include <nekobox/stats/connections/connectionLister.hpp>
 #include <nekobox/stats/autotester/ProxyAutoTester.hpp>
 #include <3rdparty/qv2ray/v2/ui/widgets/speedchart/SpeedWidget.hpp>
+#include <nekobox/ui/setting/QuickRoutesWidget.h>
 
 #ifdef Q_OS_UNIX
 #include <QtDBus>
@@ -398,6 +399,7 @@ private:
     int toolTipID;
     //
     SpeedWidget *speedChartWidget;
+    QuickRoutesWidget *quickRoutesWidget;
     //
     // for data view
     QString softwarePath;
