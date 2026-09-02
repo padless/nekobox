@@ -503,6 +503,7 @@ QByteArray hash = QCryptographicHash::hash(
         ADD_MAP("windows_set_admin", windows_set_admin, boolean);
         ADD_MAP("disable_win_admin", windows_no_admin, boolean);
         ADD_MAP("enable_stats", connection_statistics, boolean);
+        ADD_MAP("hide_core_connections", hide_core_connections, boolean);
         ADD_MAP("stats_tab", stats_tab, integer);
         #ifdef USE_CPP_PROXY_CONFIGURATOR
         ADD_MAP("proxy_scheme", proxy_scheme, string);

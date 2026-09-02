@@ -15,6 +15,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QRegularExpression>
 #include <QStandardPaths>
 
 #ifdef _WIN32
@@ -282,14 +283,17 @@ static void AddTunRuntimeRules(QJsonObject &config,
       {"action", "sniff"},
       {"inbound", QJsonArray{"tun-in"}},
   };
-  for (const auto &rule : rules) {
+  // Nekobox process/domain routes have to sit in front of the profile's own
+  // rules: a catch-all in a full custom config would otherwise swallow them.
+  for (const auto &rule : nekoboxRules) {
     patchedRules += rule;
   }
-  for (const auto &rule : nekoboxRules) {
+  for (const auto &rule : rules) {
     patchedRules += rule;
   }
 
   route["auto_detect_interface"] = true;
+  route["find_process"] = true;
   route["rules"] = patchedRules;
   config["route"] = route;
 }
@@ -370,6 +374,8 @@ label1:
 
 static QJsonArray BuildNekoboxTunRulesForFullConfig(
     const std::shared_ptr<BuildConfigStatus> &status, QJsonObject &config);
+
+static bool QuickRoutesConfigured();
 
 QString getTunAddress() {
   if (Configs::dataStore->tun_address.isEmpty())
@@ -476,6 +482,13 @@ BuildConfig(const std::shared_ptr<ProxyEntity> &ent, bool forTest,
           clientInbounds.append(BuildTunInbound({}, tunServerExcludes));
           AddTunRuntimeRules(result->coreConfig, tunServerExcludes,
                              nekoboxTunRules);
+        } else if (QuickRoutesConfigured() && MW_show_log) {
+          // A full custom config brings its own routing section and its own
+          // outbound tags, so the Routes tab can only be layered on top of it
+          // in Tun mode, where this app owns the routing section anyway.
+          MW_show_log(
+              "[Routes] Not applied: this profile is a full custom config, "
+              "routes from the Routes tab only take effect in Tun mode");
         }
         if (!clientInbounds.isEmpty())
           result->coreConfig["inbounds"] = clientInbounds;
@@ -954,6 +967,7 @@ static QList<std::shared_ptr<RouteRule>> BuildQuickRouteRules() {
 
   QList<int> outboundOrder;
   QMap<int, QList<QString>> processPaths;
+  QMap<int, QList<QString>> processPathRegexes;
   QMap<int, QList<QString>> processNames;
   QMap<int, QList<QString>> domainKeywords;
 
@@ -985,9 +999,28 @@ static QList<std::shared_ptr<RouteRule>> BuildQuickRouteRules() {
     if (!accept(value, outbound)) {
       continue;
     }
+    // sing-box matches process_path byte-for-byte, so a path from the file
+    // dialog often misses: different slashes, casing, or 8.3 names on Windows.
+    // process_name (the .exe file name) is what actually matches in practice,
+    // and is added for every entry, path or not.
+    const auto fileName = QFileInfo(value).fileName();
+    if (!fileName.isEmpty()) {
+      processNames[outbound] << fileName;
+    }
     if (value.contains(u'/') || value.contains(u'\\')) {
-      processPaths[outbound] << QDir::toNativeSeparators(value);
-    } else {
+      const auto native = QDir::toNativeSeparators(value);
+      const auto posix = QDir::fromNativeSeparators(value);
+      processPaths[outbound] << native;
+      if (posix != native) {
+        processPaths[outbound] << posix;
+      }
+      processPathRegexes[outbound]
+          << "(?i)^" + QRegularExpression::escape(native) + "$";
+      if (posix != native) {
+        processPathRegexes[outbound]
+            << "(?i)^" + QRegularExpression::escape(posix) + "$";
+      }
+    } else if (fileName.isEmpty()) {
       processNames[outbound] << value;
     }
   }
@@ -1019,6 +1052,11 @@ static QList<std::shared_ptr<RouteRule>> BuildQuickRouteRules() {
       rule->process_path = processPaths[outbound];
       rules << rule;
     }
+    if (processPathRegexes.contains(outbound)) {
+      auto rule = makeRule("Quick routes: application paths (any case)", outbound);
+      rule->process_path_regex = processPathRegexes[outbound];
+      rules << rule;
+    }
     if (processNames.contains(outbound)) {
       auto rule = makeRule("Quick routes: application names", outbound);
       rule->process_name = processNames[outbound];
@@ -1035,11 +1073,66 @@ static QList<std::shared_ptr<RouteRule>> BuildQuickRouteRules() {
   return rules;
 }
 
+static bool QuickRoutesConfigured() {
+  if (dataStore->routing == nullptr ||
+      dataStore->routing->quick_routes == nullptr) {
+    return false;
+  }
+  auto quick = dataStore->routing->quick_routes;
+  return !quick->process_match.isEmpty() || !quick->domain_match.isEmpty();
+}
+
+// The core only looks a connection's owning process up when it knows some rule
+// needs it, so a routing profile carrying process rules has to say so even when
+// connection statistics are switched off.
+static bool ChainNeedsProcessLookup(
+    const std::shared_ptr<RoutingChain> &routeChain) {
+  if (routeChain == nullptr) {
+    return false;
+  }
+  for (const auto &rule : routeChain->Rules) {
+    if (rule == nullptr) {
+      continue;
+    }
+    if (!rule->process_name.isEmpty() || !rule->process_path.isEmpty() ||
+        !rule->process_path_regex.isEmpty()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// True for the rules that only annotate a connection (sniffing, resolving, DNS
+// hijacking) rather than picking an outbound for it. Quick routes have to stay
+// behind those, or an application route would swallow the DNS traffic that the
+// routing profile means to hand to the DNS module.
+static bool IsPreRoutingRule(const std::shared_ptr<RouteRule> &rule) {
+  if (rule == nullptr) {
+    return false;
+  }
+  return rule->action == "sniff" || rule->action == "resolve" ||
+         rule->action == "hijack-dns" || rule->outboundID == dnsOutID;
+}
+
 // Quick routes are matched before the rules of the active routing profile.
 static void PrependQuickRouteRules(std::shared_ptr<RoutingChain> &routeChain) {
   const auto quickRules = BuildQuickRouteRules();
+  if (quickRules.isEmpty()) {
+    return;
+  }
+
+  qsizetype at = 0;
+  while (at < routeChain->Rules.size() &&
+         IsPreRoutingRule(routeChain->Rules[at])) {
+    at++;
+  }
   for (auto it = quickRules.crbegin(); it != quickRules.crend(); ++it) {
-    routeChain->Rules.prepend(*it);
+    routeChain->Rules.insert(at, *it);
+  }
+
+  if (MW_show_log) {
+    MW_show_log("[Routes] Injected " + QString::number(quickRules.size()) +
+                " routing rule(s) at position " + QString::number(at));
   }
 }
 
@@ -1575,7 +1668,7 @@ skip_multiple_jobs:
     routeObj["auto_detect_interface"] = true;
   }
   if (!status->forTest) {
-    if (dataStore->connection_statistics) {
+    if (dataStore->connection_statistics || ChainNeedsProcessLookup(routeChain)) {
       routeObj["find_process"] = true;
     }
     routeObj["final"] = outboundIDToString(routeChain->defaultOutboundID);

@@ -2,15 +2,48 @@
 
 
 
+#include <QFileInfo>
 #include <QThread>
 #include <nekobox/api/RPC.h>
 #include <nekobox/ui/mainwindow_interface.h>
 #include <nekobox/stats/connections/connectionLister.hpp>
+#include <nekobox/dataStore/ResourceEntity.hpp>
 #include <nekobox/global/GuiUtils.hpp>
 
 namespace Stats
 {
     ConnectionLister* connection_lister = new ConnectionLister();
+
+    // The core opens its own connections (to the remote server, for url tests,
+    // subscription and ruleset downloads). They show up as nekobox_core /
+    // nekobox-core and drown out real app traffic, so they are dropped here.
+    static QString normalizedCoreToken(const QString& raw)
+    {
+        if (raw.isEmpty()) return {};
+        QString name = QFileInfo(raw).fileName();
+        if (name.isEmpty()) name = raw;
+        name = QFileInfo(name).completeBaseName().toLower();
+        name.replace(QLatin1Char('-'), QLatin1Char('_'));
+        return name;
+    }
+
+    static bool isCoreOwnConnection(const QString& process, const QString& outbound)
+    {
+        static const QString coreBase =
+            normalizedCoreToken(QStringLiteral(NKR_CORE_NAME));
+        auto matches = [](const QString& token) {
+            return token == QLatin1String("nekobox_core") ||
+                   token == QLatin1String("nekoboxcore");
+        };
+        const auto processToken = normalizedCoreToken(process);
+        if (matches(processToken) ||
+            (!coreBase.isEmpty() && processToken == coreBase)) {
+            return true;
+        }
+        const auto outboundToken = normalizedCoreToken(outbound);
+        return matches(outboundToken) ||
+               (!coreBase.isEmpty() && outboundToken == coreBase);
+    }
 
     ConnectionLister::ConnectionLister()
     {
@@ -32,7 +65,7 @@ namespace Stats
             if (stop) return;
             QThread::msleep(1000);
 
-            if (suspend || !Configs::dataStore->connection_statistics) continue;
+            if (suspend || !tab_visible || !Configs::dataStore->connection_statistics) continue;
 
             mu.lock();
             update();
@@ -54,8 +87,15 @@ namespace Stats
         QSet<QString> newState;
         QList<ConnectionMetadata> sorted;
         auto conns = resp->connections;
+        const bool hideCore = Configs::dataStore->hide_core_connections;
         for (auto conn : conns)
         {
+            if (hideCore &&
+                isCoreOwnConnection(QString::fromUtf8(conn.process.c_str()),
+                                    QString::fromUtf8(conn.outbound.c_str()))) {
+                continue;
+            }
+
             auto c = ConnectionMetadata();
             c.id = QString::fromUtf8(conn.id.c_str());
             c.createdAtMs = conn.created_at;

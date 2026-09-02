@@ -16,6 +16,7 @@ import (
 
 	//	"nekobox_core/internal/sys"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -411,6 +412,19 @@ func (s *server) QueryStats(ctx context.Context, in *gen.EmptyReq) (*gen.QuerySt
 	return out, nil
 }
 
+func isNekoboxCoreConnection(process, outbound string) bool {
+	normalize := func(raw string) string {
+		base := strings.ToLower(filepath.Base(raw))
+		base = strings.TrimSuffix(base, ".exe")
+		base = strings.ReplaceAll(base, "-", "_")
+		return base
+	}
+	p := normalize(process)
+	o := normalize(outbound)
+	return p == "nekobox_core" || p == "nekoboxcore" ||
+		o == "nekobox_core" || o == "nekoboxcore"
+}
+
 func (s *server) ListConnections(ctx context.Context, in *gen.EmptyReq) (*gen.ListConnectionsResp, error) {
 	out := new(gen.ListConnectionsResp)
 	if internal.BoxInstance == nil {
@@ -429,8 +443,12 @@ func (s *server) ListConnections(ctx context.Context, in *gen.EmptyReq) (*gen.Li
 	for _, c := range connections {
 		process := ""
 		if c.Metadata.ProcessInfo != nil {
-			spl := strings.Split(c.Metadata.ProcessInfo.ProcessPath, string(os.PathSeparator))
-			process = spl[len(spl)-1]
+			// filepath.Base handles both / and \ so a Qt-style path still
+			// yields just the executable name on Windows.
+			process = filepath.Base(c.Metadata.ProcessInfo.ProcessPath)
+		}
+		if isNekoboxCoreConnection(process, c.Outbound) {
+			continue
 		}
 		r := &gen.ConnectionMetaData{
 			ID:        (c.ID.String()),

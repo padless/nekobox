@@ -200,6 +200,9 @@ namespace Configs {
         QStringList log_ignore = {};
         bool start_minimal = false;
         bool connection_statistics = true;
+        // The core dials its own connections (url tests, subscription fetches,
+        // ruleset downloads), they only add noise to the connection table.
+        bool hide_core_connections = true;
         int stats_tab = 0; // either connection or log
         int speed_test_mode = TestConfig::FULL;
         int speed_test_timeout_ms = 5000;

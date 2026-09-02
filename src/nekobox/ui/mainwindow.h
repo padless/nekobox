@@ -174,6 +174,9 @@ public:
 
     void refresh_proxy_list(const int &id = -1);
 
+    // Repaint one profile row without relayouting the whole table.
+    void refresh_proxy_traffic(const int &id);
+
     void show_group(int gid);
 
     void refresh_groups();

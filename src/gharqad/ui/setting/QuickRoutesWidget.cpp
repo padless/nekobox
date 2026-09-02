@@ -38,8 +38,9 @@ QuickRoutesWidget::QuickRoutesWidget(QWidget *parent) : QWidget(parent) {
     root->addWidget(splitter, 1);
 
     auto *saveRow = new QHBoxLayout();
-    auto *hint = new QLabel(tr("Saved routes are applied after the core restarts."));
+    auto *hint = new QLabel(tr("Application routes match the .exe name. Use Tun mode to capture apps that do not use the system proxy. Saving restarts the core."));
     hint->setEnabled(false);
+    hint->setWordWrap(true);
     saveRow->addWidget(hint);
     saveRow->addStretch();
     saveButton = new QPushButton(tr("Save"));
