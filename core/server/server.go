@@ -15,6 +15,7 @@ import (
 	"nekobox_core/internal/wg"
 
 	//	"nekobox_core/internal/sys"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -412,6 +413,45 @@ func (s *server) QueryStats(ctx context.Context, in *gen.EmptyReq) (*gen.QuerySt
 	return out, nil
 }
 
+func destHostPort(dest string) (string, string) {
+	if strings.HasPrefix(dest, "[") {
+		end := strings.Index(dest, "]:")
+		if end > 1 {
+			return dest[1:end], dest[end+2:]
+		}
+		end = strings.Index(dest, "]")
+		if end > 1 {
+			return dest[1:end], ""
+		}
+		return dest, ""
+	}
+	if host, port, err := net.SplitHostPort(dest); err == nil {
+		return host, port
+	}
+	return dest, ""
+}
+
+func isUninformativeConnection(process, dest, protocol, outbound string) bool {
+	if isNekoboxCoreConnection(process, outbound) {
+		return true
+	}
+	host, port := destHostPort(dest)
+	if host == "172.19.0.2" || host == "fdfe:dcba:9876::2" {
+		return true
+	}
+	dnsPort := port == "53" || port == "853"
+	if dnsPort && (host == "172.19.0.1" || host == "fdfe:dcba:9876::1") {
+		return true
+	}
+	if process != "" {
+		return false
+	}
+	if strings.EqualFold(protocol, "dns") {
+		return true
+	}
+	return dnsPort
+}
+
 func isNekoboxCoreConnection(process, outbound string) bool {
 	normalize := func(raw string) string {
 		base := strings.ToLower(filepath.Base(raw))
@@ -447,7 +487,8 @@ func (s *server) ListConnections(ctx context.Context, in *gen.EmptyReq) (*gen.Li
 			// yields just the executable name on Windows.
 			process = filepath.Base(c.Metadata.ProcessInfo.ProcessPath)
 		}
-		if isNekoboxCoreConnection(process, c.Outbound) {
+		if isUninformativeConnection(process, c.Metadata.Destination.String(),
+			c.Metadata.Protocol, c.Outbound) {
 			continue
 		}
 		r := &gen.ConnectionMetaData{

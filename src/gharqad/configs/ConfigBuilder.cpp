@@ -237,15 +237,7 @@ static QStringList CollectTunRouteExcludesForFullConfig(
   return excludes;
 }
 
-static QString TunDnsAddress() {
-  auto address = getTunAddress().section('/', 0, 0);
-  auto parts = address.split('.');
-  if (parts.size() == 4) {
-    parts[3] = "2";
-    return parts.join('.');
-  }
-  return "172.19.0.2";
-}
+static QString TunDnsAddress() { return getTunDnsAddress(); }
 
 static void AddTunRuntimeRules(QJsonObject &config,
                                const QStringList &serverExcludes,
@@ -387,6 +379,27 @@ QString getTunAddress6() {
   if (Configs::dataStore->tun_address_6.isEmpty())
     return "fdfe:dcba:9876::1/96";
   return Configs::dataStore->tun_address_6;
+}
+
+QString getTunDnsAddress() {
+  auto address = getTunAddress().section('/', 0, 0);
+  auto parts = address.split('.');
+  if (parts.size() == 4) {
+    parts[3] = "2";
+    return parts.join('.');
+  }
+  return "172.19.0.2";
+}
+
+QString getTunDnsAddress6() {
+  auto address = getTunAddress6().section('/', 0, 0);
+  if (address.endsWith(QLatin1String("::1"))) {
+    return address.left(address.size() - 1) + QLatin1Char('2');
+  }
+  if (address.endsWith(QLatin1String(":1"))) {
+    return address.left(address.size() - 1) + QLatin1Char('2');
+  }
+  return address;
 }
 
 QString getTunName() {

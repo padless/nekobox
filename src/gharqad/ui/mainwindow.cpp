@@ -142,6 +142,36 @@ if (grp != nullptr) {                                     \
 #define STATE_CHANGED &QCheckBox::stateChanged
 #endif
 
+namespace {
+QMutex g_pendingLogMu;
+QStringList g_pendingLogs;
+QTimer *g_logFlushTimer = nullptr;
+
+void flushPendingLogs() {
+  QString chunk;
+  {
+    QMutexLocker lock(&g_pendingLogMu);
+    if (g_pendingLogs.isEmpty()) {
+      return;
+    }
+    chunk = g_pendingLogs.join(QLatin1Char('\n'));
+    g_pendingLogs.clear();
+  }
+  auto *m = GetMainWindow();
+  if (m != nullptr) {
+    m->show_log_impl(chunk);
+  }
+}
+
+void enqueueLog(const QString &log) {
+  QMutexLocker lock(&g_pendingLogMu);
+  g_pendingLogs.append(log);
+  while (g_pendingLogs.size() > 400) {
+    g_pendingLogs.removeFirst();
+  }
+}
+} // namespace
+
 void MainWindow::set_icons() {
     set_icons_from_settings();
     bool hide_url_test = force_hide_text_under_buttons || (!Configs::windowSettings->show_test_button);
@@ -954,9 +984,11 @@ MainWindow::MainWindow(QWidget *parent)
             logErrorsOnlyFilter = checked;
             rebuildLogView();
           });
-  MW_show_log = [=, this](const QString &log) {
-    runOnUiThread([=, this] { show_log_impl(log); });
-  };
+  MW_show_log = [](const QString &log) { enqueueLog(log); };
+  g_logFlushTimer = new QTimer(this);
+  g_logFlushTimer->setInterval(100);
+  connect(g_logFlushTimer, &QTimer::timeout, this, [] { flushPendingLogs(); });
+  g_logFlushTimer->start();
 
   // Listen port if random
   if (Configs::dataStore->random_inbound_port) {
@@ -3043,7 +3075,8 @@ void setAppIcon(Icon::TrayIconStatus icon_status_new, QSystemTrayIcon *tray,
 
 void MainWindow::update_traffic_graph(int proxyDl, int proxyUp, int directDl,
                                       int directUp) {
-  if (speedChartWidget) {
+  if (speedChartWidget &&
+      ui->stats_widget->currentWidget() == ui->graph_tab) {
     QMap<SpeedWidget::GraphType, long> pointData;
     pointData[SpeedWidget::OUTBOUND_PROXY_UP] = proxyUp;
     pointData[SpeedWidget::OUTBOUND_PROXY_DOWN] = proxyDl;
@@ -4475,13 +4508,15 @@ void MainWindow::show_log_impl(const QString &log) {
     entry.text = cleanLine;
     entry.isError = LogRoute::isErrorLine(cleanLine);
     logLineBuffer.append(entry);
-    while (logLineBuffer.size() > kMaxLogBufferLines) {
-      logLineBuffer.removeFirst();
-    }
 
     if (!logErrorsOnlyFilter || entry.isError) {
       linesToShow << cleanLine;
     }
+  }
+  const int overflow = logLineBuffer.size() - kMaxLogBufferLines;
+  if (overflow > 0) {
+    logLineBuffer.erase(logLineBuffer.begin(),
+                        logLineBuffer.begin() + overflow);
   }
 
   // Laying the log document out on every core line is what turns a busy
